@@ -11,7 +11,11 @@ import (
 
 func basePolicy(t *testing.T) Policy {
 	t.Helper()
-	return Policy{WebRootBase: filepath.Join(t.TempDir(), "www")}
+	root := t.TempDir()
+	return Policy{
+		WebRootBase:    filepath.Join(root, "www"),
+		LetsEncryptDir: filepath.Join(root, "letsencrypt"),
+	}
 }
 
 func proxySite() domain.SiteConfig {
@@ -237,6 +241,7 @@ func TestValidateRawConfig(t *testing.T) {
 		"root escape":          "server {\n    server_name raw.example.com;\n    root /etc;\n}\n",
 		"unbalanced":           "server {\n    server_name raw.example.com;\n",
 		"two servers":          valid + "server {\n    server_name other.example.com;\n}\n",
+		"three servers":        valid + "server {\n    server_name raw.example.com;\n}\nserver {\n    server_name raw.example.com;\n}\n",
 		"not a server":         "http {\n}\n",
 		"empty":                "",
 	}
@@ -255,5 +260,97 @@ func TestValidateRawAndStructuredAreExclusive(t *testing.T) {
 	site.RawConfig = "server {\n    server_name api.example.com;\n}\n"
 	if issues := ValidateSite(site, basePolicy(t)); len(issues) == 0 {
 		t.Error("raw_config combined with structured fields was accepted")
+	}
+}
+
+func TestValidateRawListenArgs(t *testing.T) {
+	policy := basePolicy(t)
+	valid := []string{
+		"listen 80;",
+		"listen 443 ssl http2;",
+		"listen 0.0.0.0:443 ssl default_server reuseport;",
+		"listen [::]:443 ssl http2;",
+	}
+	for _, listen := range valid {
+		raw := "server {\n    " + listen + "\n    server_name raw.example.com;\n}\n"
+		site := domain.SiteConfig{Domain: "raw.example.com", RawConfig: raw}
+		if issues := ValidateSite(site, policy); len(issues) != 0 {
+			t.Errorf("%q rejected: %+v", listen, issues)
+		}
+	}
+
+	invalid := []string{
+		"listen unix:/etc/cron.d/x;",
+		"listen 8080;",
+		"listen 127.0.0.1:80;",
+		"listen 443 ssl bogus;",
+		"listen;",
+	}
+	for _, listen := range invalid {
+		raw := "server {\n    " + listen + "\n    server_name raw.example.com;\n}\n"
+		site := domain.SiteConfig{Domain: "raw.example.com", RawConfig: raw}
+		if issues := ValidateSite(site, policy); len(issues) == 0 {
+			t.Errorf("%q accepted", listen)
+		}
+	}
+}
+
+func TestRawSSLCertificatePaths(t *testing.T) {
+	policy := basePolicy(t)
+	good := "server {\n    listen 443 ssl http2;\n    server_name raw.example.com;\n" +
+		"    ssl_certificate " + policy.LetsEncryptDir + "/raw.example.com/fullchain.pem;\n" +
+		"    ssl_certificate_key " + policy.LetsEncryptDir + "/raw.example.com/privkey.pem;\n" +
+		"    ssl_protocols TLSv1.2 TLSv1.3;\n}\n"
+	site := domain.SiteConfig{Domain: "raw.example.com", RawConfig: good}
+	if issues := ValidateSite(site, policy); len(issues) != 0 {
+		t.Fatalf("valid SSL raw config rejected: %+v", issues)
+	}
+
+	badPaths := []string{
+		"/etc/ssl/private/other.key",
+		"/etc/letsencrypt/live/other.example.com/fullchain.pem",
+		policy.LetsEncryptDir + "/raw.example.com/privkey.pem",
+	}
+	for _, path := range badPaths {
+		raw := "server {\n    server_name raw.example.com;\n    ssl_certificate " + path + ";\n}\n"
+		site := domain.SiteConfig{Domain: "raw.example.com", RawConfig: raw}
+		if issues := ValidateSite(site, policy); len(issues) == 0 {
+			t.Errorf("ssl_certificate %q accepted", path)
+		}
+	}
+}
+
+// TestRenderOutputRoundTripsThroughRawValidation locks in the property that
+// the houston editor can POST GET-site output back unchanged.
+func TestRenderOutputRoundTripsThroughRawValidation(t *testing.T) {
+	policy := basePolicy(t)
+	certDir := policy.LetsEncryptDir
+	webRoot := filepath.Join(policy.WebRootBase, "site")
+
+	sites := []domain.SiteConfig{
+		{Domain: "proxy.example.com", ProxyTarget: "http://127.0.0.1:3000"},
+		{Domain: "static.example.com", WebRoot: webRoot},
+		{Domain: "mixed.example.com", WebRoot: webRoot, ProxyTarget: "http://127.0.0.1:8081"},
+		{
+			Domain:      "ssl.example.com",
+			ProxyTarget: "http://127.0.0.1:3000",
+			EnableSSL:   true,
+			CustomRules: []string{"add_header X-Frame-Options DENY;", "client_max_body_size 10m;"},
+		},
+		{
+			Domain:    "sslstatic.example.com",
+			WebRoot:   webRoot,
+			EnableSSL: true,
+		},
+	}
+	for _, site := range sites {
+		rendered, _, err := Render(site, RenderOptions{CertExists: site.EnableSSL, CertDir: certDir})
+		if err != nil {
+			t.Fatalf("render %s: %v", site.Domain, err)
+		}
+		raw := domain.SiteConfig{Domain: site.Domain, RawConfig: rendered}
+		if issues := ValidateSite(raw, policy); len(issues) != 0 {
+			t.Errorf("%s rendered output rejected as raw_config: %+v\n%s", site.Domain, issues, rendered)
+		}
 	}
 }

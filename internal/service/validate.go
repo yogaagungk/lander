@@ -17,6 +17,7 @@ import (
 type Policy struct {
 	AllowPublicUpstream bool
 	WebRootBase         string
+	LetsEncryptDir      string
 }
 
 const (
@@ -85,6 +86,38 @@ var rawAllowedStructural = map[string]bool{
 var rawForbiddenProxyParts = []string{
 	"store", "temp", "cache", "ssl_certificate", "ssl_password",
 	"ssl_trusted", "ssl_crl", "ssl_verify",
+}
+
+// allowedListenAddresses prevents raw_config from creating files such as
+// unix:/etc/cron.d/x (the nginx master runs as root).
+var allowedListenAddresses = map[string]bool{
+	"80":          true,
+	"443":         true,
+	"[::]:80":     true,
+	"[::]:443":    true,
+	"0.0.0.0:80":  true,
+	"0.0.0.0:443": true,
+}
+
+var allowedListenFlags = map[string]bool{
+	"ssl":            true,
+	"http2":          true,
+	"default_server": true,
+	"reuseport":      true,
+}
+
+// rawAllowedSSL is the tuning set houston may round-trip for an HTTPS site.
+// Certificate paths are checked separately against the managed cert dir.
+var rawAllowedSSL = map[string]bool{
+	"ssl_certificate":           true,
+	"ssl_certificate_key":       true,
+	"ssl_protocols":             true,
+	"ssl_ciphers":               true,
+	"ssl_prefer_server_ciphers": true,
+	"ssl_session_cache":         true,
+	"ssl_session_timeout":       true,
+	"ssl_session_tickets":       true,
+	"ssl_stapling":              true,
 }
 
 // ValidateSite validates a SiteConfig against ADR-002. It returns an empty
@@ -353,10 +386,32 @@ func isRedirectCode(code string) bool {
 	}
 }
 
+func checkListenArgs(args []string) string {
+	if len(args) == 0 {
+		return "listen requires an address"
+	}
+	if !allowedListenAddresses[args[0]] {
+		return fmt.Sprintf("listen address %q is not allowed; use 80 or 443 on 0.0.0.0/[::]", args[0])
+	}
+	for _, flag := range args[1:] {
+		if !allowedListenFlags[flag] {
+			return fmt.Sprintf("listen flag %q is not allowed", flag)
+		}
+	}
+	return ""
+}
+
+func letsEncryptDir(policy Policy) string {
+	if policy.LetsEncryptDir == "" {
+		return "/etc/letsencrypt/live"
+	}
+	return policy.LetsEncryptDir
+}
+
 // rawDirectiveAllowed is a strict allow-list for raw_config. It is a superset
 // of the custom_rules list plus the directives a server/location block needs.
 func rawDirectiveAllowed(name string) bool {
-	if rawAllowedStructural[name] || allowedDirectives[name] {
+	if rawAllowedStructural[name] || allowedDirectives[name] || rawAllowedSSL[name] {
 		return true
 	}
 	if strings.HasPrefix(name, "proxy_") {
@@ -421,6 +476,23 @@ func validateRawConfig(raw, domainName string, policy Policy) []domain.Issue {
 					Message: fmt.Sprintf("server_name must be exactly %q", domainName),
 				})
 			}
+		case "listen":
+			if msg := checkListenArgs(d.args); msg != "" {
+				issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: msg})
+			}
+		case "ssl_certificate", "ssl_certificate_key":
+			file := "fullchain.pem"
+			if d.name == "ssl_certificate_key" {
+				file = "privkey.pem"
+			}
+			want := filepath.Join(letsEncryptDir(policy), domainName, file)
+			if len(d.args) != 1 || d.args[0] != want {
+				issues = append(issues, domain.Issue{
+					Field:   "raw_config",
+					Line:    d.line,
+					Message: fmt.Sprintf("%s must be exactly %q", d.name, want),
+				})
+			}
 		case "proxy_pass":
 			if len(d.args) != 1 || strings.ContainsRune(d.args[0], '$') {
 				issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: "proxy_pass must use a single literal, validated URL"})
@@ -468,8 +540,8 @@ func validateRawConfig(raw, domainName string, policy Policy) []domain.Issue {
 		}
 	}
 
-	if topLevel != 1 || !topLevelValid {
-		issues = append(issues, domain.Issue{Field: "raw_config", Message: "raw_config must contain exactly one top-level server block and nothing else"})
+	if topLevel < 1 || topLevel > 2 || !topLevelValid {
+		issues = append(issues, domain.Issue{Field: "raw_config", Message: "raw_config must contain one or two top-level server blocks for the domain and nothing else"})
 	}
 	if !sawServerName {
 		issues = append(issues, domain.Issue{Field: "raw_config", Message: fmt.Sprintf("server_name is required and must be exactly %q", domainName)})

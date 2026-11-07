@@ -111,6 +111,7 @@ func (s *Nginx) Policy() Policy {
 	return Policy{
 		AllowPublicUpstream: s.cfg.AllowPublicUpstream,
 		WebRootBase:         s.cfg.WebRootBase,
+		LetsEncryptDir:      s.cfg.LetsEncryptDir,
 	}
 }
 
