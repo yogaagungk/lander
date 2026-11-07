@@ -10,6 +10,7 @@ User=lander
 Group=lander
 EnvironmentFile=-/etc/lander/lander.env
 Environment=LANDER_SUDO=true
+Environment=LANDER_CERTBOT_BIN=/usr/local/sbin/lander-certbot
 ExecStart=/usr/local/bin/lander
 Restart=on-failure
 RestartSec=3
@@ -24,7 +25,23 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-ReadWritePaths=/etc/nginx /etc/letsencrypt /var/lib/lander /var/log/lander
+# ProtectSystem=full makes /usr, /boot and /etc read-only; ReadWritePaths opens
+# only what lander (and the sudo'd nginx/certbot children, which inherit this
+# mount namespace) must write. /etc/letsencrypt is needed by lander-certbot.
+ProtectSystem=full
+PrivateDevices=true
+RestrictNamespaces=true
+# AF_NETLINK: sudo audit hook and glibc lookups in the inherited sudo/certbot children may need it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+# Not set on purpose: MemoryDenyWriteExecute (certbot/python), CapabilityBoundingSet
+# (sudo needs SETUID/SETGID/AUDIT_WRITE). Revisit ProtectSystem=strict after the
+# first real run (needs RW /var/log/letsencrypt /var/lib/letsencrypt /var/log/nginx /run).
+# The "-" prefix ignores missing paths instead of failing with 226/NAMESPACE.
+ReadWritePaths=-/etc/nginx/sites-available -/etc/nginx/sites-enabled -/var/lib/lander -/var/log/lander -/etc/letsencrypt
 
 [Install]
 WantedBy=multi-user.target
