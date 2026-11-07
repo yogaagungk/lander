@@ -95,17 +95,21 @@ LANDER_LISTEN_ADDR=127.0.0.1:8080
 LANDER_SUDO=true
 ```
 
-Run it locally for a smoke test:
+On a PC the daemon starts, but `/healthz` returns 503 `degraded` until the Nginx binary and site directories exist:
 
 ```sh
 LANDER_SECRET_TOKEN="$(openssl rand -hex 32)" ./bin/lander
+curl -s http://127.0.0.1:8080/healthz
 ```
 
 Example output (values are example data):
 
 ```text
 {"time":"2026-11-07T10:00:00Z","level":"INFO","msg":"lander listening","addr":"127.0.0.1:8080","version":"dev"}
+{"status":"degraded","version":"dev","nginx_active":false}
 ```
+
+The site commands below run on the VPS after `make install-systemd` and a valid `/etc/lander/lander.env`. On a PC, `/etc/nginx/sites-available` is normally not writable and `POST /api/v1/nginx/site` fails.
 
 Create a site and inspect it:
 
