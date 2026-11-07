@@ -13,9 +13,9 @@ import (
 
 const certbotTimeout = 120 * time.Second
 
-// IssueSSL requests a certificate with certbot's nginx authenticator. It uses
-// `certbot certonly`, so the plugin proves control of the domain but never
-// rewrites the managed vhost; Render adds the 443 block once the cert exists.
+// IssueSSL requests a certificate through the configured certbot wrapper.
+// The wrapper accepts exactly <domain> <email>, owns the certbot flags, and is
+// the only path named in sudoers, so lander never passes arbitrary options.
 func (s *Nginx) IssueSSL(ctx context.Context, req domain.SSLRequest) (domain.SSLResult, error) {
 	result := domain.SSLResult{Domain: req.Domain}
 
@@ -41,13 +41,7 @@ func (s *Nginx) IssueSSL(ctx context.Context, req domain.SSLRequest) (domain.SSL
 	s.cmdMu.Lock()
 	defer s.cmdMu.Unlock()
 
-	args := []string{
-		"certonly", "--nginx",
-		"-d", req.Domain,
-		"--non-interactive", "--agree-tos",
-		"--email", req.Email,
-		"--keep-until-expiring",
-	}
+	args := []string{req.Domain, req.Email}
 	out, err := s.runPrivileged(ctx, s.cfg.CertbotBin, certbotTimeout, args...)
 	if err != nil {
 		if errors.Is(err, ErrTimeout) {

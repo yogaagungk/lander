@@ -77,7 +77,7 @@ func newTestAPI(t *testing.T, mutators ...func(*config.Config)) *testAPI {
 		NginxConfPath:   filepath.Join(root, "nginx.conf"),
 		NginxBin:        "/usr/sbin/nginx",
 		SystemctlBin:    "/usr/bin/systemctl",
-		CertbotBin:      "/usr/bin/certbot",
+		CertbotBin:      config.DefaultCertbotBin,
 		WebRootBase:     filepath.Join(root, "www"),
 		LetsEncryptDir:  filepath.Join(root, "letsencrypt"),
 		EnvDir:          filepath.Join(root, "env"),
