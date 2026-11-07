@@ -95,7 +95,7 @@ LANDER_LISTEN_ADDR=127.0.0.1:8080
 LANDER_SUDO=true
 ```
 
-On a PC the daemon starts, but `/healthz` returns 503 `degraded` until the Nginx binary and site directories exist:
+On a PC the daemon starts, but `/healthz` returns 503 `degraded` until nginx is active under systemd (on a PC without nginx it stays degraded):
 
 ```sh
 LANDER_SECRET_TOKEN="$(openssl rand -hex 32)" ./bin/lander
