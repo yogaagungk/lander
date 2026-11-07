@@ -1,0 +1,350 @@
+openapi: 3.0.3
+info:
+  title: lander API
+  version: 1.0.0
+  description: |
+    VPS daemon (Nginx/system manager). REST only. Bind 127.0.0.1:8080; expose only behind TLS (ADR-002).
+    All endpoints except /healthz require `Authorization: Bearer <LANDER_SECRET_TOKEN>`.
+    Errors use `Error` schema. Request bodies limited to 1 MiB (env: 256 KiB). Unknown JSON fields -> 400.
+servers:
+  - url: http://127.0.0.1:8080
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      summary: Liveness/readiness (no auth)
+      security: []
+      operationId: healthz
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+        '503':
+          description: Daemon up but nginx unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+  /api/v1/system/stats:
+    get:
+      summary: CPU/memory/nginx/uptime
+      operationId: getStats
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SystemStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/v1/nginx/sites:
+    get:
+      summary: List lander-managed sites
+      operationId: listSites
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sites]
+                properties:
+                  sites:
+                    type: array
+                    items: { $ref: '#/components/schemas/SiteSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/nginx/site:
+    get:
+      summary: Get one site (structured + raw config)
+      operationId: getSite
+      parameters:
+        - { $ref: '#/components/parameters/Domain' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SiteDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Create or update a site (idempotent upsert)
+      description: |
+        Provide EITHER structured fields (`proxy_target`/`web_root`/...) OR `raw_config` (houston editor), never both.
+        Pipeline: validate -> write temp -> atomic rename -> symlink -> `nginx -t` -> reload. On `nginx -t` failure nothing changes (422).
+        Re-posting identical config is a no-op returning 200 with `changed:false`.
+      operationId: upsertSite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SiteConfig' }
+      responses:
+        '200':
+          description: Applied (updated or unchanged)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApplyResult' }
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApplyResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422':
+          description: Validation or `nginx -t` failed; config NOT applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      summary: Delete site (symlink + config) and reload
+      operationId: deleteSite
+      parameters:
+        - { $ref: '#/components/parameters/Domain' }
+      responses:
+        '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: Reload failed after delete; config restored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+  /api/v1/nginx/validate:
+    post:
+      summary: Dry-run validation (never writes to sites-enabled, never reloads)
+      description: "Writes candidate to a temp include-root, runs `nginx -t` against it, deletes it. Always 200; check `valid`."
+      operationId: validateSite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SiteConfig' }
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidateResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/nginx/ssl:
+    post:
+      summary: Issue/renew certificate via certbot
+      description: Domain must already exist as a site and resolve to this VPS. May take up to 120 s. Subject to Let's Encrypt rate limits.
+      operationId: issueSSL
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SSLRequest' }
+      responses:
+        '200':
+          description: Issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SSLResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: "certbot failed (DNS, rate limit, ...)"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '504': { description: certbot timeout, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /api/v1/env:
+    post:
+      summary: Write-only env upsert for an app (blackbox sync target)
+      description: |
+        Writes `/var/lib/lander/env/<app>.env` (0640 lander:deploy), merge or replace. Values are NEVER returned by any endpoint
+        and never logged. Consumed by `docker run --env-file` in the deploy flow (ADR-006).
+      operationId: putEnv
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnvRequest' }
+      responses:
+        '200':
+          description: Applied; returns key names only
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { description: Payload too large, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  parameters:
+    Domain:
+      name: domain
+      in: query
+      required: true
+      schema: { $ref: '#/components/schemas/Domain' }
+  responses:
+    BadRequest:
+      description: Malformed request or failed input validation
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: Missing/invalid token (uniform body)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Conflict:
+      description: Concurrent change on same domain; retry
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      description: Too many failed auth attempts
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    Domain:
+      type: string
+      maxLength: 253
+      pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
+      example: api.example.com
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [bad_request, unauthorized, not_found, conflict, validation_failed, nginx_test_failed, certbot_failed, payload_too_large, rate_limited, timeout, internal]
+            message: { type: string }
+            request_id: { type: string }
+    ValidationError:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: '#/components/schemas/Error/properties/error' }
+        issues:
+          type: array
+          items: { $ref: '#/components/schemas/Issue' }
+    Issue:
+      type: object
+      required: [message]
+      properties:
+        field: { type: string, example: "custom_rules[2]" }
+        line: { type: integer, description: "1-based line in raw_config/rendered config, when known" }
+        message: { type: string }
+    SiteConfig:
+      type: object
+      required: [domain]
+      additionalProperties: false
+      properties:
+        domain: { $ref: '#/components/schemas/Domain' }
+        proxy_target:
+          type: string
+          description: "http(s) URL, loopback/RFC1918 by default (ADR-002)"
+          example: http://127.0.0.1:3000
+        enable_ssl: { type: boolean, default: false, description: "Render 443 block if cert exists; does not itself run certbot (use /nginx/ssl)" }
+        web_root: { type: string, description: "Absolute path under LANDER_WEB_ROOT_BASE; mutually usable with proxy_target for static+proxy fallbacks" }
+        custom_rules:
+          type: array
+          maxItems: 32
+          items: { type: string, maxLength: 512 }
+          description: Single allow-listed nginx directives ending in ';'
+        raw_config:
+          type: string
+          maxLength: 262144
+          description: Full server config text. Mutually exclusive with all fields except `domain`. Scanned against ADR-002 rules and `nginx -t`.
+    SiteSummary:
+      type: object
+      required: [domain, enabled, ssl]
+      properties:
+        domain: { $ref: '#/components/schemas/Domain' }
+        proxy_target: { type: string }
+        enabled: { type: boolean }
+        ssl: { type: boolean, description: Cert present for domain }
+        cert_expires_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time }
+        managed: { type: boolean, description: false if file was not created by lander (read-only) }
+    SiteDetail:
+      allOf:
+        - { $ref: '#/components/schemas/SiteSummary' }
+        - type: object
+          required: [config, raw_config, etag]
+          properties:
+            config: { $ref: '#/components/schemas/SiteConfig' }
+            raw_config: { type: string }
+            etag: { type: string, description: "sha256 of raw_config; send back as `If-Match` on POST to detect concurrent edits (409)" }
+    ApplyResult:
+      type: object
+      required: [domain, changed]
+      properties:
+        domain: { $ref: '#/components/schemas/Domain' }
+        changed: { type: boolean }
+        reloaded: { type: boolean }
+        etag: { type: string }
+        warnings: { type: array, items: { type: string } }
+    ValidateResult:
+      type: object
+      required: [valid]
+      properties:
+        valid: { type: boolean }
+        issues: { type: array, items: { $ref: '#/components/schemas/Issue' } }
+        nginx_output: { type: string, description: Truncated 4 KiB nginx -t stderr }
+        rendered_config: { type: string }
+    SSLRequest:
+      type: object
+      required: [domain, email]
+      additionalProperties: false
+      properties:
+        domain: { $ref: '#/components/schemas/Domain' }
+        email: { type: string, format: email, maxLength: 254 }
+    SSLResult:
+      type: object
+      required: [domain, issued]
+      properties:
+        domain: { $ref: '#/components/schemas/Domain' }
+        issued: { type: boolean }
+        expires_at: { type: string, format: date-time }
+    EnvRequest:
+      type: object
+      required: [app, vars]
+      additionalProperties: false
+      properties:
+        app: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$', example: my-api }
+        mode: { type: string, enum: [merge, replace], default: merge }
+        vars:
+          type: object
+          maxProperties: 256
+          description: "KEY -> value; keys match ^[A-Z_][A-Z0-9_]*$, values <=8 KiB, no newlines"
+          additionalProperties: { type: string, maxLength: 8192 }
+        delete_keys: { type: array, items: { type: string } }
+    EnvResult:
+      type: object
+      required: [app, keys]
+      properties:
+        app: { type: string }
+        keys: { type: array, items: { type: string }, description: Sorted key names only }
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        version: { type: string }
+        nginx_active: { type: boolean }
+    SystemStatus:
+      type: object
+      required: [cpu_usage, memory_usage, nginx_active, uptime]
+      properties:
+        cpu_usage: { type: number, description: Percent 0-100 }
+        memory_usage: { type: number, description: Percent 0-100 }
+        nginx_active: { type: boolean }
+        uptime: { type: integer, format: uint64, description: Seconds }

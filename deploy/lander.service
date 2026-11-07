@@ -1,0 +1,29 @@
+[Unit]
+Description=ORBIT lander daemon (Nginx manager)
+Documentation=https://github.com/yogaagungk/lander
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lander
+Group=lander
+EnvironmentFile=-/etc/lander/lander.env
+ExecStart=/usr/local/bin/lander
+Restart=on-failure
+RestartSec=3
+
+# Hardening per ADR-002. NoNewPrivileges must stay off because lander calls
+# sudo for the exact nginx/systemctl/certbot commands.
+NoNewPrivileges=false
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/etc/nginx /etc/letsencrypt /var/lib/lander /var/log/lander
+
+[Install]
+WantedBy=multi-user.target
