@@ -31,6 +31,8 @@ const (
 var (
 	ErrNotFound  = errors.New("site not found")
 	ErrUnmanaged = errors.New("site config is not managed by lander")
+	ErrConflict  = errors.New("site changed since the supplied etag")
+	ErrTimeout   = errors.New("command timed out")
 )
 
 // ValidationError reports rejected input.
@@ -86,6 +88,7 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 type Nginx struct {
 	cfg    config.Config
 	runner CommandRunner
+	stats  StatsProvider
 
 	// cmdMu serialises nginx -t and reload across all domains.
 	cmdMu sync.Mutex
@@ -102,6 +105,7 @@ func NewNginx(cfg config.Config, runner CommandRunner) *Nginx {
 	return &Nginx{
 		cfg:         cfg,
 		runner:      runner,
+		stats:       systemStats{},
 		domainLocks: make(map[string]*sync.Mutex),
 	}
 }
@@ -134,6 +138,12 @@ func (s *Nginx) NginxActive(ctx context.Context) bool {
 // Apply renders and atomically installs a site configuration. The previous
 // file is restored and the symlink reverted if nginx -t or the reload fails.
 func (s *Nginx) Apply(ctx context.Context, sc domain.SiteConfig) (domain.ApplyResult, error) {
+	return s.ApplyWithETag(ctx, sc, "")
+}
+
+// ApplyWithETag is Apply with optimistic concurrency: when ifMatch is
+// non-empty the stored config must still hash to that etag (409 otherwise).
+func (s *Nginx) ApplyWithETag(ctx context.Context, sc domain.SiteConfig, ifMatch string) (domain.ApplyResult, error) {
 	result := domain.ApplyResult{Domain: sc.Domain}
 
 	if issues := ValidateSite(sc, s.Policy()); len(issues) > 0 {
@@ -168,8 +178,14 @@ func (s *Nginx) Apply(ctx context.Context, sc domain.SiteConfig) (domain.ApplyRe
 	if err != nil {
 		return result, fmt.Errorf("read existing site config: %w", err)
 	}
+	result.Created = !exists
 	if exists && !isManagedConfig(existing) {
 		return result, ErrUnmanaged
+	}
+	if ifMatch != "" {
+		if !exists || ETag(string(existing)) != normalizeETag(ifMatch) {
+			return result, ErrConflict
+		}
 	}
 	linkState, err := inspectLink(link)
 	if err != nil {
@@ -412,7 +428,11 @@ func (s *Nginx) runPrivileged(ctx context.Context, name string, timeout time.Dur
 func (s *Nginx) runCommand(ctx context.Context, name string, timeout time.Duration, args ...string) ([]byte, error) {
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return s.runner.Run(cmdCtx, name, args...)
+	out, err := s.runner.Run(cmdCtx, name, args...)
+	if err != nil && errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
+		return out, fmt.Errorf("%w: %v", ErrTimeout, err)
+	}
+	return out, err
 }
 
 func (s *Nginx) lockDomain(domainName string) func() {

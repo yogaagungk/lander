@@ -37,19 +37,18 @@ func run() error {
 	slog.SetDefault(logger)
 
 	nginx := service.NewNginx(cfg, nil)
-
-	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", handler.Healthz(version, nginx.NginxActive))
-	// TODO(L3): authenticated routes, bearer middleware, rate limiting.
+	env := service.NewEnvStore(cfg.EnvDir)
+	api := handler.New(cfg, nginx, env, version, logger)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           mux,
+		Handler:           api.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20,
+		// certbot may take up to 120 s, so leave headroom for /nginx/ssl.
+		WriteTimeout:   150 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	serverErr := make(chan error, 1)

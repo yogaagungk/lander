@@ -48,6 +48,8 @@ type ApplyResult struct {
 	Reloaded bool     `json:"reloaded"`
 	ETag     string   `json:"etag,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// Created is internal-only and selects 201 vs 200.
+	Created bool `json:"-"`
 }
 
 // ValidateResult is returned by POST /api/v1/nginx/validate.

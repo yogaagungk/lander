@@ -4,9 +4,9 @@ ORBIT Suite VPS daemon: manages Nginx virtual hosts, certificates and app env
 files behind a local, bearer-token-authenticated REST API. Standalone: it
 needs no other ORBIT tool to function.
 
-Status: L1 scaffold + L2 Nginx service (template rendering, validation,
-atomic apply with rollback, reload). HTTP site routes, SSL, env and stats are
-L3; systemd packaging is finalized by Palugada in L4.
+Status: L1 scaffold, L2 Nginx service (rendering, strict validation, atomic
+apply with rollback, reload) and L3 HTTP API (bearer auth, rate limit, sites,
+validate, SSL, env, stats). systemd packaging is finalized by Palugada in L4.
 
 ## Requirements
 
@@ -45,7 +45,38 @@ vhost or an SSH tunnel (ADR-002).
 | `LANDER_WEB_ROOT_BASE` | `/var/www` | Allowed static roots |
 | `LANDER_ALLOW_PUBLIC_UPSTREAM` | `false` | Permit public `proxy_target` hosts |
 | `LANDER_SUDO` | `false` | Prefix privileged commands with `sudo -n`; the unit sets `true` |
-| `LANDER_ENV_DIR` | `/var/lib/lander/env` | App env files (L3) |
+| `LANDER_ENV_DIR` | `/var/lib/lander/env` | App env files |
+
+## API
+
+All `/api/v1/*` routes need `Authorization: Bearer <LANDER_SECRET_TOKEN>`.
+Errors use `{"error":{"code","message","request_id"}}`; validation errors add
+`issues`. Ten failed auth attempts per IP and minute return 429 with
+`Retry-After`. Request ids are echoed in `X-Request-Id`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/healthz` | Liveness (no auth, 503 when nginx is down) |
+| GET | `/api/v1/system/stats` | CPU, memory, nginx, uptime |
+| GET | `/api/v1/nginx/sites` | Managed site summaries |
+| GET | `/api/v1/nginx/site?domain=` | Structured + raw config and ETag |
+| POST | `/api/v1/nginx/site` | Upsert (honours `If-Match`; 409 on stale) |
+| DELETE | `/api/v1/nginx/site?domain=` | Remove site and reload |
+| POST | `/api/v1/nginx/validate` | Dry-run `nginx -t` (advisory) |
+| POST | `/api/v1/nginx/ssl` | Issue/renew via certbot |
+| POST | `/api/v1/env` | Write-only app env (merge/replace) |
+
+`POST /nginx/site` is idempotent: identical content returns 200 with
+`changed:false`, a new site returns 201. `GET` returns the stored file as
+`raw_config`; `ETag` is its sha256, so houston can POST it back with the same
+`If-Match`.
+
+SSL is a two-step flow: `POST /nginx/ssl` issues the certificate, then re-post
+the site with `enable_ssl:true` so the generator adds the 443 block. certbot
+runs as `certonly --nginx`, so it never rewrites the managed vhost.
+
+`POST /api/v1/env` accepts `merge` (default) or `replace`, validates key names,
+never returns or logs values, and writes `0640` files under `LANDER_ENV_DIR`.
 
 ## Safety model (ADR-002)
 
@@ -75,7 +106,7 @@ vhost or an SSH tunnel (ADR-002).
 cmd/lander            entrypoint and graceful shutdown
 internal/config       environment parsing and validation
 internal/domain       API structs
-internal/handler      HTTP handlers (healthz in L1)
+internal/handler      HTTP API, bearer auth, rate limiting, errors
 internal/service      Nginx rendering, validation, apply/rollback
 deploy/               provisional systemd unit and env example
 openapi.yaml          API contract (copied from the suite docs)
