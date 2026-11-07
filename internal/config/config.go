@@ -50,6 +50,7 @@ type Config struct {
 	EnvDir              string
 	AuditLogPath        string
 	AllowPublicUpstream bool
+	UseSudo             bool
 
 	MaxBodyBytes    int64
 	MaxEnvBodyBytes int64
@@ -86,6 +87,9 @@ func Load(getenv func(string) string) (Config, error) {
 
 	var err error
 	if cfg.AllowPublicUpstream, err = parseBool(getenv, "LANDER_ALLOW_PUBLIC_UPSTREAM", false); err != nil {
+		return Config{}, err
+	}
+	if cfg.UseSudo, err = parseBool(getenv, "LANDER_SUDO", false); err != nil {
 		return Config{}, err
 	}
 	if cfg.MaxBodyBytes, err = parseInt64(getenv, "LANDER_MAX_BODY_BYTES", DefaultMaxBodyBytes); err != nil {

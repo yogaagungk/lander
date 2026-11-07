@@ -40,6 +40,7 @@ func TestValidateSiteAcceptsValidConfigs(t *testing.T) {
 			"limit_req zone=one burst=5;",
 			"return 301 https://example.com$request_uri;",
 			"expires 1d;",
+			"add_header X-Quoted \"a;b\";",
 		}},
 		"raw": {Domain: "raw.example.com", RawConfig: "server {\n    listen 80;\n    server_name raw.example.com;\n    location / {\n        proxy_pass http://127.0.0.1:3000;\n    }\n}\n"},
 	}
@@ -89,6 +90,7 @@ func TestValidateProxyTargetPolicy(t *testing.T) {
 		"http://127.0.0.1:99999",
 		"http://8.8.8.8:80",
 		"http://example.com:80",
+		"http://169.254.169.254:80",
 		"http://127.0.0.1:3000/path/../secret",
 		"http://127.0.0.1:3000/\ninclude",
 		"",
@@ -166,6 +168,8 @@ func TestValidateCustomRules(t *testing.T) {
 		"non-3xx return":        "return 200;",
 		"return without status": "return https://example.com;",
 		"ssl override":          "ssl_certificate /tmp/cert.pem;",
+		"embedded semicolon":    "add_header X a; include /etc/passwd;",
+		"embedded directive":    "gzip on; proxy_pass http://8.8.8.8;",
 	}
 	for name, rule := range rejected {
 		t.Run(name, func(t *testing.T) {
@@ -201,29 +205,40 @@ func TestValidateSiteRequiresTarget(t *testing.T) {
 
 func TestValidateRawConfig(t *testing.T) {
 	policy := basePolicy(t)
-	valid := "server {\n    listen 80;\n    server_name raw.example.com;\n    location / {\n        proxy_pass http://127.0.0.1:3000;\n    }\n}\n"
+	valid := "server {\n    listen 80;\n    server_name raw.example.com;\n    add_header X \"a;b\";\n    location / {\n        proxy_pass http://127.0.0.1:3000;\n    }\n}\n"
 	site := domain.SiteConfig{Domain: "raw.example.com", RawConfig: valid}
 	if issues := ValidateSite(site, policy); len(issues) != 0 {
 		t.Fatalf("valid raw config rejected: %+v", issues)
 	}
 
 	rejected := map[string]string{
-		"missing server_name": "server {\n    listen 80;\n}\n",
-		"include":             "server {\n    server_name raw.example.com;\n    include /etc/passwd;\n}\n",
-		"alias":               "server {\n    server_name raw.example.com;\n    location / { alias /etc/; }\n}\n",
-		"lua":                 "server {\n    server_name raw.example.com;\n    access_by_lua_block { os.execute('id') }\n}\n",
-		"ssl override":        "server {\n    server_name raw.example.com;\n    ssl_certificate /tmp/x.pem;\n}\n",
-		"fastcgi":             "server {\n    server_name raw.example.com;\n    location / { fastcgi_pass 8.8.8.8:9000; }\n}\n",
-		"public proxy":        "server {\n    server_name raw.example.com;\n    location / { proxy_pass http://8.8.8.8:80; }\n}\n",
-		"variable proxy":      "server {\n    server_name raw.example.com;\n    location / { proxy_pass http://$backend; }\n}\n",
-		"newline include":     "server {\n    server_name raw.example.com;\n    include\n    /etc/passwd;\n}\n",
-		"newline proxy":       "server {\n    server_name raw.example.com;\n    location / {\n        proxy_pass\n        http://8.8.8.8:80;\n    }\n}\n",
-		"access log":          "server {\n    server_name raw.example.com;\n    access_log /var/log/nginx/x.log;\n}\n",
-		"root escape":         "server {\n    server_name raw.example.com;\n    root /etc;\n}\n",
-		"unbalanced":          "server {\n    server_name raw.example.com;\n",
-		"two servers":         valid + "server {\n    server_name other.example.com;\n}\n",
-		"not a server":        "http {\n}\n",
-		"empty":               "",
+		"missing server_name":  "server {\n    listen 80;\n}\n",
+		"include":              "server {\n    server_name raw.example.com;\n    include /etc/passwd;\n}\n",
+		"alias":                "server {\n    server_name raw.example.com;\n    location / { alias /etc/; }\n}\n",
+		"lua":                  "server {\n    server_name raw.example.com;\n    access_by_lua_block { os.execute('id') }\n}\n",
+		"ssl override":         "server {\n    server_name raw.example.com;\n    ssl_certificate /tmp/x.pem;\n}\n",
+		"fastcgi":              "server {\n    server_name raw.example.com;\n    location / { fastcgi_pass 8.8.8.8:9000; }\n}\n",
+		"public proxy":         "server {\n    server_name raw.example.com;\n    location / { proxy_pass http://8.8.8.8:80; }\n}\n",
+		"variable proxy":       "server {\n    server_name raw.example.com;\n    location / { proxy_pass http://$backend; }\n}\n",
+		"newline include":      "server {\n    server_name raw.example.com;\n    include\n    /etc/passwd;\n}\n",
+		"newline proxy":        "server {\n    server_name raw.example.com;\n    location / {\n        proxy_pass\n        http://8.8.8.8:80;\n    }\n}\n",
+		"access log":           "server {\n    server_name raw.example.com;\n    access_log /var/log/nginx/x.log;\n}\n",
+		"comment bypass":       "server {\n    server_name raw.example.com;\n    add_header X a#b; include /etc/passwd;\n}\n",
+		"extra server_name":    "server {\n    server_name raw.example.com victim.com;\n}\n",
+		"proxy_store":          "server {\n    server_name raw.example.com;\n    proxy_store /etc/cron.d/x;\n}\n",
+		"proxy_temp_path":      "server {\n    server_name raw.example.com;\n    proxy_temp_path /etc/cron.d;\n}\n",
+		"dav_methods":          "server {\n    server_name raw.example.com;\n    dav_methods PUT;\n}\n",
+		"create_full_put_path": "server {\n    server_name raw.example.com;\n    create_full_put_path on;\n}\n",
+		"auth_request":         "server {\n    server_name raw.example.com;\n    auth_request /internal;\n}\n",
+		"mirror":               "server {\n    server_name raw.example.com;\n    mirror /copy;\n}\n",
+		"ssi":                  "server {\n    server_name raw.example.com;\n    ssi on;\n}\n",
+		"js prefix":            "server {\n    server_name raw.example.com;\n    js_preload_object foo from foo.js;\n}\n",
+		"perl prefix":          "server {\n    server_name raw.example.com;\n    perl_set $x 'sub { 1 }';\n}\n",
+		"root escape":          "server {\n    server_name raw.example.com;\n    root /etc;\n}\n",
+		"unbalanced":           "server {\n    server_name raw.example.com;\n",
+		"two servers":          valid + "server {\n    server_name other.example.com;\n}\n",
+		"not a server":         "http {\n}\n",
+		"empty":                "",
 	}
 	for name, raw := range rejected {
 		t.Run(name, func(t *testing.T) {

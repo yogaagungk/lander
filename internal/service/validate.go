@@ -31,9 +31,6 @@ var (
 	domainRE = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 	// hostRE accepts a single DNS label (docker service name) or an FQDN.
 	hostRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
-	// directiveRE finds directives inside the config; arguments stop at ; { }.
-	// \s includes newlines so a directive may wrap onto the next line.
-	directiveRE = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)\s+([^;{}]*)`)
 )
 
 // allowedDirectives is the ADR-002 allow-list for custom_rules.
@@ -65,47 +62,29 @@ var allowedDirectives = map[string]bool{
 	"gzip_static":           true,
 }
 
-// deniedInRaw lists directives that must never appear in a user-supplied
-// server block. Lua/JS prefixes are additionally matched by name.
-var deniedInRaw = map[string]bool{
-	"include":                       true,
-	"load_module":                   true,
-	"alias":                         true,
-	"ssl_certificate":               true,
-	"ssl_certificate_key":           true,
-	"ssl_trusted_certificate":       true,
-	"ssl_client_certificate":        true,
-	"ssl_crl":                       true,
-	"ssl_dhparam":                   true,
-	"ssl_password_file":             true,
-	"ssl_session_ticket_key":        true,
-	"ssl_stapling_file":             true,
-	"proxy_ssl_certificate":         true,
-	"proxy_ssl_certificate_key":     true,
-	"proxy_ssl_trusted_certificate": true,
-	"proxy_ssl_crl":                 true,
-	"proxy_ssl_password_file":       true,
-	"fastcgi_pass":                  true,
-	"uwsgi_pass":                    true,
-	"scgi_pass":                     true,
-	"grpc_pass":                     true,
-	"perl":                          true,
-	"perl_set":                      true,
-	"perl_modules":                  true,
-	"js_import":                     true,
-	"js_set":                        true,
-	"js_content":                    true,
-	"js_access":                     true,
-	"js_body_filter":                true,
-	"js_header_filter":              true,
-	"access_log":                    true,
-	"error_log":                     true,
-	"auth_basic_user_file":          true,
-	"env":                           true,
-	"user":                          true,
-	"pid":                           true,
-	"daemon":                        true,
-	"master_process":                true,
+// rawAllowedStructural are the additional directives a raw server block may
+// use. Everything not listed here or in allowedDirectives is rejected.
+var rawAllowedStructural = map[string]bool{
+	"server":      true,
+	"location":    true,
+	"if":          true,
+	"listen":      true,
+	"server_name": true,
+	"root":        true,
+	"index":       true,
+	"try_files":   true,
+	"error_page":  true,
+	"set":         true,
+	"charset":     true,
+	"allow":       true,
+	"deny":        true,
+}
+
+// rawForbiddenProxyParts keeps proxy_* surface small: no file writes, cache
+// paths or certificate overrides.
+var rawForbiddenProxyParts = []string{
+	"store", "temp", "cache", "ssl_certificate", "ssl_password",
+	"ssl_trusted", "ssl_crl", "ssl_verify",
 }
 
 // ValidateSite validates a SiteConfig against ADR-002. It returns an empty
@@ -207,7 +186,7 @@ func validateProxyTarget(raw string, policy Policy) []domain.Issue {
 		return []domain.Issue{{Field: field, Message: "proxy_target host must be an IP address or a valid hostname"}}
 	}
 	if !policy.AllowPublicUpstream && !isLocalUpstream(host) {
-		return []domain.Issue{{Field: field, Message: "proxy_target host must be loopback, private or link-local when LANDER_ALLOW_PUBLIC_UPSTREAM is false"}}
+		return []domain.Issue{{Field: field, Message: "proxy_target host must be loopback or RFC1918 when LANDER_ALLOW_PUBLIC_UPSTREAM is false"}}
 	}
 	return nil
 }
@@ -220,7 +199,7 @@ func isLocalUpstream(host string) bool {
 	if ip == nil {
 		return false // a public DNS name cannot be verified offline
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	return ip.IsLoopback() || ip.IsPrivate()
 }
 
 func validateWebRoot(raw, base string) []domain.Issue {
@@ -304,6 +283,8 @@ func validateCustomRules(rules []string) []domain.Issue {
 	return issues
 }
 
+// checkCustomRule tokenizes the rule with Nginx semantics so an embedded
+// ';', comment or quoted separator cannot smuggle a second directive.
 func checkCustomRule(rule string) string {
 	if len(rule) > maxRuleLength {
 		return fmt.Sprintf("rule must be at most %d bytes", maxRuleLength)
@@ -311,14 +292,40 @@ func checkCustomRule(rule string) string {
 	if strings.TrimSpace(rule) != rule || rule == "" {
 		return "rule must be a single directive without surrounding whitespace"
 	}
-	if strings.ContainsAny(rule, "\r\n{}#") {
-		return "rule must not contain newlines, braces or comments"
+	if strings.ContainsAny(rule, "\r\n") {
+		return "rule must be a single line without newlines"
 	}
 	if !strings.HasSuffix(rule, ";") {
 		return "rule must end with ';'"
 	}
 
-	fields := strings.Fields(strings.TrimSuffix(rule, ";"))
+	tokens, err := tokenize(rule)
+	if err != nil {
+		return "rule is not valid nginx syntax: " + err.Error()
+	}
+	semicolons := 0
+	for _, tok := range tokens {
+		switch tok.kind {
+		case tokenSemicolon:
+			semicolons++
+		case tokenLBrace, tokenRBrace:
+			return "rule must not open or close a block"
+		}
+	}
+	if len(tokens) == 0 {
+		return "rule is empty"
+	}
+	if semicolons != 1 || tokens[len(tokens)-1].kind != tokenSemicolon {
+		return "rule must be exactly one directive ending with ';'"
+	}
+
+	fields := make([]string, 0, len(tokens)-1)
+	for _, tok := range tokens[:len(tokens)-1] {
+		if tok.kind != tokenWord {
+			return "rule contains an unexpected token"
+		}
+		fields = append(fields, tok.value)
+	}
 	if len(fields) == 0 {
 		return "rule is empty"
 	}
@@ -330,13 +337,37 @@ func checkCustomRule(rule string) string {
 		if len(fields) < 2 {
 			return "return requires an explicit 3xx status code"
 		}
-		switch fields[1] {
-		case "301", "302", "303", "307", "308":
-		default:
+		if !isRedirectCode(fields[1]) {
 			return "return is only allowed with a 3xx status code"
 		}
 	}
 	return ""
+}
+
+func isRedirectCode(code string) bool {
+	switch code {
+	case "301", "302", "303", "307", "308":
+		return true
+	default:
+		return false
+	}
+}
+
+// rawDirectiveAllowed is a strict allow-list for raw_config. It is a superset
+// of the custom_rules list plus the directives a server/location block needs.
+func rawDirectiveAllowed(name string) bool {
+	if rawAllowedStructural[name] || allowedDirectives[name] {
+		return true
+	}
+	if strings.HasPrefix(name, "proxy_") {
+		for _, forbidden := range rawForbiddenProxyParts {
+			if strings.Contains(name, forbidden) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func validateRawConfig(raw, domainName string, policy Policy) []domain.Issue {
@@ -350,113 +381,98 @@ func validateRawConfig(raw, domainName string, policy Policy) []domain.Issue {
 		return []domain.Issue{{Field: "raw_config", Message: "raw_config must not be empty"}}
 	}
 
-	var issues []domain.Issue
-	// The marker comment is prepended on render; bare input is expected here.
-	stripped := stripComments(raw)
-	trimmed := strings.TrimSpace(stripped)
-	if !regexp.MustCompile(`^server\s*\{`).MatchString(trimmed) {
-		issues = append(issues, domain.Issue{Field: "raw_config", Message: "raw_config must contain a single top-level server block"})
+	tokens, err := tokenize(raw)
+	if err != nil {
+		return []domain.Issue{{Field: "raw_config", Message: err.Error()}}
 	}
-	if depth, ok := braceBalance(stripped); !ok || depth != 0 {
-		issues = append(issues, domain.Issue{Field: "raw_config", Message: "raw_config has unbalanced braces"})
-	}
-	if n := regexp.MustCompile(`(?m)^\s*server\s*\{`).FindAllStringIndex(stripped, -1); len(n) != 1 {
-		issues = append(issues, domain.Issue{Field: "raw_config", Message: "raw_config must contain exactly one top-level server block"})
+	directives, err := parseDirectives(tokens)
+	if err != nil {
+		return []domain.Issue{{Field: "raw_config", Message: err.Error()}}
 	}
 
-	serverNames := map[string]bool{}
-	for _, d := range scanDirectives(stripped) {
-		switch {
-		case deniedInRaw[d.name] || strings.Contains(d.name, "lua"):
+	var issues []domain.Issue
+	topLevel := 0
+	topLevelValid := true
+	sawServerName := false
+
+	for _, d := range directives {
+		if d.depth == 0 {
+			topLevel++
+			if d.name != "server" || !d.block || len(d.args) != 0 {
+				topLevelValid = false
+			}
+		}
+		if d.name == "server" && d.depth > 0 {
+			issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: "nested server blocks are not allowed"})
+			continue
+		}
+		if !rawDirectiveAllowed(d.name) {
 			issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: fmt.Sprintf("directive %q is not allowed", d.name)})
-		case d.name == "proxy_pass":
-			target := strings.TrimSpace(d.args)
-			if target == "" || strings.ContainsRune(target, '$') {
-				issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: "proxy_pass must use a literal, validated URL"})
+			continue
+		}
+
+		switch d.name {
+		case "server_name":
+			sawServerName = true
+			if len(d.args) != 1 || d.args[0] != domainName {
+				issues = append(issues, domain.Issue{
+					Field:   "raw_config",
+					Line:    d.line,
+					Message: fmt.Sprintf("server_name must be exactly %q", domainName),
+				})
+			}
+		case "proxy_pass":
+			if len(d.args) != 1 || strings.ContainsRune(d.args[0], '$') {
+				issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: "proxy_pass must use a single literal, validated URL"})
 				continue
 			}
-			for _, issue := range validateProxyTarget(target, policy) {
+			for _, issue := range validateProxyTarget(d.args[0], policy) {
 				issue.Field = "raw_config"
 				issue.Line = d.line
 				issues = append(issues, issue)
 			}
-		case d.name == "root":
-			value := strings.TrimSpace(d.args)
-			if value == "" || strings.ContainsRune(value, '$') {
-				issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: "root must be a literal path"})
+		case "root":
+			if len(d.args) != 1 || strings.ContainsRune(d.args[0], '$') {
+				issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: "root must be a single literal path"})
 				continue
 			}
-			for _, issue := range validateWebRoot(value, policy.WebRootBase) {
+			for _, issue := range validateWebRoot(d.args[0], policy.WebRootBase) {
 				issue.Field = "raw_config"
 				issue.Line = d.line
 				issues = append(issues, issue)
 			}
-		case d.name == "server_name":
-			for _, name := range strings.Fields(d.args) {
-				serverNames[strings.Trim(name, `"'`)] = true
+		case "try_files", "error_page":
+			if len(d.args) < 2 {
+				issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: d.name + " requires at least two arguments"})
+			}
+			for _, arg := range d.args {
+				if strings.Contains(arg, "..") {
+					issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: d.name + " must not contain '..'"})
+					break
+				}
+			}
+		case "index":
+			if len(d.args) < 1 {
+				issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: "index requires at least one argument"})
+			}
+			for _, arg := range d.args {
+				if strings.Contains(arg, "..") {
+					issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: "index must not contain '..'"})
+					break
+				}
+			}
+		case "return":
+			if len(d.args) < 2 || !isRedirectCode(d.args[0]) {
+				issues = append(issues, domain.Issue{Field: "raw_config", Line: d.line, Message: "return is only allowed with an explicit 3xx status code"})
 			}
 		}
 	}
-	if !serverNames[domainName] {
-		issues = append(issues, domain.Issue{Field: "raw_config", Message: fmt.Sprintf("server_name must include %q", domainName)})
+
+	if topLevel != 1 || !topLevelValid {
+		issues = append(issues, domain.Issue{Field: "raw_config", Message: "raw_config must contain exactly one top-level server block and nothing else"})
+	}
+	if !sawServerName {
+		issues = append(issues, domain.Issue{Field: "raw_config", Message: fmt.Sprintf("server_name is required and must be exactly %q", domainName)})
 	}
 	return issues
-}
-
-func stripComments(text string) string {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		if idx := strings.IndexByte(line, '#'); idx >= 0 {
-			lines[i] = line[:idx]
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-// braceBalance reports the final nesting depth and whether it ever went
-// negative. Quotes and escapes are skipped so literal braces do not count.
-func braceBalance(text string) (int, bool) {
-	depth := 0
-	var quote rune
-	escaped := false
-	for _, r := range text {
-		switch {
-		case escaped:
-			escaped = false
-		case r == '\\' && quote != 0:
-			escaped = true
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			}
-		case r == '"' || r == '\'':
-			quote = r
-		case r == '{':
-			depth++
-		case r == '}':
-			depth--
-			if depth < 0 {
-				return depth, false
-			}
-		}
-	}
-	return depth, true
-}
-
-type scannedDirective struct {
-	name string
-	args string
-	line int
-}
-
-func scanDirectives(text string) []scannedDirective {
-	var out []scannedDirective
-	for _, match := range directiveRE.FindAllStringSubmatchIndex(text, -1) {
-		out = append(out, scannedDirective{
-			name: strings.ToLower(text[match[2]:match[3]]),
-			args: strings.TrimSpace(text[match[4]:match[5]]),
-			line: 1 + strings.Count(text[:match[0]], "\n"),
-		})
-	}
-	return out
 }

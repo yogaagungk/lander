@@ -57,7 +57,7 @@ func (f *fakeRunner) callsOf(name string) []runnerCall {
 	return out
 }
 
-func newTestService(t *testing.T, runner CommandRunner) (*Nginx, config.Config) {
+func newTestService(t *testing.T, runner CommandRunner, mutators ...func(*config.Config)) (*Nginx, config.Config) {
 	t.Helper()
 	root := t.TempDir()
 	cfg := config.Config{
@@ -78,6 +78,9 @@ func newTestService(t *testing.T, runner CommandRunner) (*Nginx, config.Config) 
 		AuthFailWindow:  time.Minute,
 		ShutdownTimeout: 10 * time.Second,
 		CommandTimeout:  15 * time.Second,
+	}
+	for _, mutate := range mutators {
+		mutate(&cfg)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("invalid test config: %v", err)
@@ -370,6 +373,16 @@ func TestValidateDryRun(t *testing.T) {
 	runner := &fakeRunner{}
 	svc, cfg := newTestService(t, runner)
 
+	var wrapperContent string
+	runner.fail = func(name string, args []string) ([]byte, error) {
+		if name == cfg.NginxBin && len(args) >= 3 {
+			if data, err := os.ReadFile(args[2]); err == nil {
+				wrapperContent = string(data)
+			}
+		}
+		return nil, nil
+	}
+
 	result, err := svc.Validate(context.Background(), proxySite())
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -379,6 +392,9 @@ func TestValidateDryRun(t *testing.T) {
 	}
 	if !strings.Contains(result.RenderedConfig, "proxy_pass") {
 		t.Error("rendered config missing from result")
+	}
+	if !strings.Contains(wrapperContent, "access_log off;") {
+		t.Errorf("validation wrapper must disable access logs:\n%s", wrapperContent)
 	}
 	entries, err := os.ReadDir(cfg.SitesAvailable)
 	if err != nil {
@@ -468,5 +484,36 @@ func TestApplyConcurrentDifferentDomains(t *testing.T) {
 		if _, err := os.Stat(sitePath(cfg, domainName)); err != nil {
 			t.Errorf("%s not created: %v", domainName, err)
 		}
+	}
+}
+
+func TestPrivilegedCommandsUseSudo(t *testing.T) {
+	runner := &fakeRunner{}
+	svc, cfg := newTestService(t, runner, func(c *config.Config) { c.UseSudo = true })
+
+	if _, err := svc.Apply(context.Background(), proxySite()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	calls := runner.callsOf("sudo")
+	if len(calls) != 2 {
+		t.Fatalf("sudo calls = %d, want 2", len(calls))
+	}
+	want := [][]string{
+		{"-n", cfg.NginxBin, "-t", "-c", cfg.NginxConfPath},
+		{"-n", cfg.SystemctlBin, "reload", "nginx"},
+	}
+	for i, expected := range want {
+		if got := strings.Join(calls[i].args, " "); got != strings.Join(expected, " ") {
+			t.Errorf("sudo call %d = %q, want %q", i, got, strings.Join(expected, " "))
+		}
+	}
+
+	// Status probes are unprivileged and must not need the sudoers entry.
+	_ = svc.NginxActive(context.Background())
+	if got := len(runner.callsOf("sudo")); got != 2 {
+		t.Errorf("NginxActive used sudo: %d calls", got)
+	}
+	if got := len(runner.callsOf(cfg.SystemctlBin)); got != 1 {
+		t.Errorf("unprivileged systemctl is-active calls = %d, want 1", got)
 	}
 }

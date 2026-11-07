@@ -138,8 +138,9 @@ func ensureTrailingNewline(s string) string {
 	return s + "\n"
 }
 
-// ETag returns the sha256 of a rendered config as lowercase hex. Clients send
-// it back as If-Match to detect concurrent edits.
+// ETag returns the sha256 of a rendered config as lowercase hex. GET returns
+// the stored file as raw_config, so hashing that same content keeps If-Match
+// consistent with the openapi description.
 func ETag(config string) string {
 	sum := sha256.Sum256([]byte(config))
 	return hex.EncodeToString(sum[:])

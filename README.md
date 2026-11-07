@@ -44,21 +44,30 @@ vhost or an SSH tunnel (ADR-002).
 | `LANDER_NGINX_CONF` | `/etc/nginx/nginx.conf` | Passed to `nginx -t -c` |
 | `LANDER_WEB_ROOT_BASE` | `/var/www` | Allowed static roots |
 | `LANDER_ALLOW_PUBLIC_UPSTREAM` | `false` | Permit public `proxy_target` hosts |
+| `LANDER_SUDO` | `false` | Prefix privileged commands with `sudo -n`; the unit sets `true` |
 | `LANDER_ENV_DIR` | `/var/lib/lander/env` | App env files (L3) |
 
 ## Safety model (ADR-002)
 
 - No shell: `os/exec` with fixed binaries and argument slices only.
 - Input is rejected, never repaired: RFC-1123 domains, validated proxy
-  targets (loopback/private by default), web roots under the base directory
-  with symlink-escape checks, an allow-list for `custom_rules`, and a
-  denylist+`server_name` check for `raw_config`.
+  targets (loopback/RFC1918 by default; no link-local or metadata ranges),
+  web roots under the base directory with symlink-escape checks, strict
+  allow-lists for `custom_rules` and `raw_config` (parsed with an Nginx-style
+  tokenizer), structural checks (one server block, exact `server_name`) and
+  `nginx -t`.
+- Dry-run validation wraps the candidate in a temporary config and is
+  advisory only; cross-file references such as shared `limit_req` zones are
+  checked by the real apply.
 - Apply pipeline: render → temp file → backup → rename → symlink →
   `nginx -t` → `systemctl reload nginx`. Any failure restores the previous
   file and symlink, so a rejected config leaves the system unchanged.
 - Files lander did not create (no `# Managed by lander` marker) are never
   overwritten or deleted.
-- Per-domain locks plus a global lock around `nginx -t`/reload.
+- Per-domain locks plus a global lock held from the file swap through
+  `nginx -t` and reload.
+- Privileged commands go through `sudo -n` when `LANDER_SUDO=true` (set by
+  the unit); the sudoers drop-in allows only the exact forms lander uses.
 
 ## Layout
 

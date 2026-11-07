@@ -9,6 +9,7 @@ Type=simple
 User=lander
 Group=lander
 EnvironmentFile=-/etc/lander/lander.env
+Environment=LANDER_SUDO=true
 ExecStart=/usr/local/bin/lander
 Restart=on-failure
 RestartSec=3

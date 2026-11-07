@@ -142,6 +142,12 @@ func (s *Nginx) Apply(ctx context.Context, sc domain.SiteConfig) (domain.ApplyRe
 	unlock := s.lockDomain(sc.Domain)
 	defer unlock()
 
+	// Hold the global command lock from before the file swap until the reload
+	// completes, so a concurrent apply cannot make nginx -t read a
+	// half-applied configuration tree.
+	s.cmdMu.Lock()
+	defer s.cmdMu.Unlock()
+
 	content, warnings, err := Render(sc, RenderOptions{
 		CertExists: s.CertExists(sc.Domain),
 		CertDir:    s.cfg.LetsEncryptDir,
@@ -154,6 +160,7 @@ func (s *Nginx) Apply(ctx context.Context, sc domain.SiteConfig) (domain.ApplyRe
 
 	final := s.sitePath(sc.Domain)
 	link := s.linkPath(sc.Domain)
+	// TODO(L3): recover an orphan .bak left by a crash when final is absent.
 	backup := final + ".bak"
 
 	existing, exists, err := readFileIfExists(final)
@@ -181,7 +188,7 @@ func (s *Nginx) Apply(ctx context.Context, sc domain.SiteConfig) (domain.ApplyRe
 		if !linkChanged {
 			return result, nil
 		}
-		if err := s.testAndReload(ctx); err != nil {
+		if err := s.testAndReloadLocked(ctx); err != nil {
 			_ = os.Remove(link)
 			if linkState.exists {
 				_ = os.Symlink(linkState.target, link)
@@ -231,7 +238,7 @@ func (s *Nginx) Apply(ctx context.Context, sc domain.SiteConfig) (domain.ApplyRe
 		return result, err
 	}
 
-	if err := s.testAndReload(ctx); err != nil {
+	if err := s.testAndReloadLocked(ctx); err != nil {
 		restore()
 		return result, err
 	}
@@ -247,6 +254,11 @@ func (s *Nginx) Apply(ctx context.Context, sc domain.SiteConfig) (domain.ApplyRe
 // Validate is a dry run: it renders the candidate into a temporary include
 // root, runs nginx -t against it and removes it. It never writes to the real
 // sites directories and never reloads.
+//
+// The wrapper contains only the candidate block, so cross-file references
+// (for example a limit_req zone declared in another file) are not visible
+// here; a successful Validate is advisory and the real Apply remains the
+// authority.
 func (s *Nginx) Validate(ctx context.Context, sc domain.SiteConfig) (domain.ValidateResult, error) {
 	result := domain.ValidateResult{}
 
@@ -277,7 +289,7 @@ func (s *Nginx) Validate(ctx context.Context, sc domain.SiteConfig) (domain.Vali
 	}
 	wrapper := filepath.Join(dir, "nginx.conf")
 	wrapperConfig := fmt.Sprintf(
-		"worker_processes 1;\nerror_log stderr;\npid \"%s\";\nevents { worker_connections 64; }\nhttp {\n    include \"%s\";\n}\n",
+		"worker_processes 1;\nerror_log stderr;\npid \"%s\";\nevents { worker_connections 64; }\nhttp {\n    access_log off;\n    include \"%s\";\n}\n",
 		filepath.Join(dir, "nginx.pid"), candidate,
 	)
 	if err := os.WriteFile(wrapper, []byte(wrapperConfig), fileMode); err != nil {
@@ -285,7 +297,7 @@ func (s *Nginx) Validate(ctx context.Context, sc domain.SiteConfig) (domain.Vali
 	}
 
 	s.cmdMu.Lock()
-	out, testErr := s.runCommand(ctx, s.cfg.NginxBin, nginxTestTimeout, "-t", "-c", wrapper)
+	out, testErr := s.runPrivileged(ctx, s.cfg.NginxBin, nginxTestTimeout, "-t", "-c", wrapper)
 	s.cmdMu.Unlock()
 
 	result.NginxOutput = truncateOutput(out)
@@ -305,6 +317,11 @@ func (s *Nginx) Delete(ctx context.Context, domainName string) error {
 
 	unlock := s.lockDomain(domainName)
 	defer unlock()
+
+	// Keep the global lock across removal, nginx -t and reload (same reason
+	// as Apply).
+	s.cmdMu.Lock()
+	defer s.cmdMu.Unlock()
 
 	final := s.sitePath(domainName)
 	link := s.linkPath(domainName)
@@ -349,7 +366,7 @@ func (s *Nginx) Delete(ctx context.Context, domainName string) error {
 		}
 	}
 
-	if err := s.testAndReload(ctx); err != nil {
+	if err := s.testAndReloadLocked(ctx); err != nil {
 		restore()
 		return err
 	}
@@ -367,21 +384,28 @@ func (s *Nginx) linkPath(domainName string) string {
 	return filepath.Join(s.cfg.SitesEnabled, domainName+".conf")
 }
 
-// testAndReload validates the full Nginx configuration and reloads it while
-// holding the global command lock.
-func (s *Nginx) testAndReload(ctx context.Context) error {
-	s.cmdMu.Lock()
-	defer s.cmdMu.Unlock()
-
-	out, err := s.runCommand(ctx, s.cfg.NginxBin, nginxTestTimeout, "-t", "-c", s.cfg.NginxConfPath)
+// testAndReloadLocked validates the full Nginx configuration and reloads it.
+// The caller must hold cmdMu for the whole install+test+reload window.
+func (s *Nginx) testAndReloadLocked(ctx context.Context) error {
+	out, err := s.runPrivileged(ctx, s.cfg.NginxBin, nginxTestTimeout, "-t", "-c", s.cfg.NginxConfPath)
 	if err != nil {
 		return &CommandError{Op: "nginx -t", Output: truncateOutput(out), Err: err}
 	}
-	out, err = s.runCommand(ctx, s.cfg.SystemctlBin, reloadTimeout, "reload", "nginx")
+	out, err = s.runPrivileged(ctx, s.cfg.SystemctlBin, reloadTimeout, "reload", "nginx")
 	if err != nil {
 		return &CommandError{Op: "systemctl reload nginx", Output: truncateOutput(out), Err: err}
 	}
 	return nil
+}
+
+// runPrivileged prefixes "sudo -n" when LANDER_SUDO is enabled. The sudoers
+// drop-in must allow only the exact command forms lander uses.
+func (s *Nginx) runPrivileged(ctx context.Context, name string, timeout time.Duration, args ...string) ([]byte, error) {
+	if s.cfg.UseSudo {
+		args = append([]string{"-n", name}, args...)
+		name = "sudo"
+	}
+	return s.runCommand(ctx, name, timeout, args...)
 }
 
 func (s *Nginx) runCommand(ctx context.Context, name string, timeout time.Duration, args ...string) ([]byte, error) {
