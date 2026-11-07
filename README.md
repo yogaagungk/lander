@@ -165,7 +165,7 @@ Run as root on the VPS (Debian/Ubuntu, Linux amd64 or arm64). The installer is s
 ```sh
 curl -fsSL https://github.com/yogaagungk/lander/releases/latest/download/install.sh | sudo bash
 # pin a version (recommended) and preview without changing anything:
-curl -fsSL https://github.com/yogaagungk/lander/releases/download/v0.1.0/install.sh | sudo bash -s -- --version v0.1.0 --dry-run
+curl -fsSL https://github.com/yogaagungk/lander/releases/download/v0.1.1/install.sh | sudo bash -s -- --version v0.1.1 --dry-run
 ```
 
 The installer downloads the release tarball and `checksums.txt`, verifies sha256 (stops on mismatch), replaces `/usr/local/bin/lander` atomically, installs the hardened systemd unit, and creates `/etc/lander/lander.env` only if absent (never overwritten). It starts the service only after you set `LANDER_SECRET_TOKEN` (`openssl rand -hex 32`), then checks `/healthz`; on a failed health check it restores the previous binary (`/usr/local/bin/lander.prev`).
