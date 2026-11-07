@@ -24,7 +24,11 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-ReadWritePaths=/etc/nginx /etc/letsencrypt /var/lib/lander /var/log/lander
+# ProtectSystem=full makes /usr, /boot and /etc read-only; ReadWritePaths opens
+# only what lander (and the sudo'd nginx/certbot children, which inherit this
+# mount namespace) must write. /etc/letsencrypt is needed by lander-certbot.
+ProtectSystem=full
+ReadWritePaths=/etc/nginx/sites-available /etc/nginx/sites-enabled /var/lib/lander /var/log/lander /etc/letsencrypt
 
 [Install]
 WantedBy=multi-user.target

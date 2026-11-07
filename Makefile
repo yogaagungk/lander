@@ -31,9 +31,8 @@ clean:
 install: build
 	install -Dm0755 bin/$(BINARY) $(BIN_DIR)/$(BINARY)
 
-# Installs the binary and the provisional systemd unit. Palugada owns the
-# final hardened unit, sudoers drop-in and env file in L4.
+# Installs binary, hardened unit and (if absent) env file, then enables lander.
+# Run as root on the VPS after orbit-suite/vps-bootstrap/bootstrap.sh.
+# The service is started only when the env token has been changed.
 install-systemd: install
-	install -Dm0644 deploy/lander.service $(UNIT_DIR)/lander.service
-	systemctl daemon-reload
-	systemctl enable --now lander
+	UNIT_DIR='$(UNIT_DIR)' sh deploy/install-systemd.sh
