@@ -160,7 +160,7 @@ curl -s -H "Authorization: Bearer $LANDER_SECRET_TOKEN" http://127.0.0.1:8080/ap
 
 ## One-click install on the VPS
 
-Prerequisite: run `orbit-suite/vps-bootstrap/bootstrap.sh` with `LANDER_DOMAIN` first (creates the `lander` user, sudoers rule, Nginx and the certbot wrapper). Then, as root on the VPS (Linux amd64 or arm64):
+Run as root on the VPS (Debian/Ubuntu, Linux amd64 or arm64). The installer is self-contained: if missing it installs `nginx`, `certbot` and `python3-certbot-nginx` with apt, and it creates the `lander` user, the `deploy` group, `/etc/sudoers.d/lander` (checked with `visudo`), the root-owned `/usr/local/sbin/lander-certbot` wrapper and the state directories. It does not touch the firewall, SSH, Nginx vhosts or certificates; use `orbit-suite/vps-bootstrap/bootstrap.sh` for host hardening and the TLS vhost.
 
 ```sh
 curl -fsSL https://github.com/yogaagungk/lander/releases/latest/download/install.sh | sudo bash
@@ -176,7 +176,7 @@ The installer downloads the release tarball and `checksums.txt`, verifies sha256
 | `install.sh upgrade [--version vX.Y.Z]` | Same flow, prints installed and target version. |
 | `install.sh status` | Binary version, service state, `/healthz` code. |
 | `install.sh uninstall [--purge]` | Removes service and binary; keeps config and data unless `--purge`. |
-| `--dry-run` | Prints what would happen, changes nothing. |
+| `--dry-run` | Prints what would happen (including prerequisite steps), changes nothing. |
 
 Releases are built by GitHub Actions on every `vX.Y.Z` tag (`.github/workflows/release.yml`): static `linux_amd64` and `linux_arm64` tarballs, `checksums.txt` and `install.sh`. Use `LANDER_REPO` to install from a fork.
 

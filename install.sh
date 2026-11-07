@@ -5,8 +5,9 @@
 #   curl -fsSL https://github.com/yogaagungk/lander/releases/latest/download/install.sh | sudo bash -s -- --version v1.0.0
 #
 # Usage: install.sh [install|upgrade|uninstall|status] [--version vX.Y.Z] [--dry-run] [--purge]
-# Prerequisite: orbit-suite/vps-bootstrap/bootstrap.sh with LANDER_DOMAIN (creates the
-# 'lander' user, sudoers rule, nginx and the certbot wrapper).
+# Self-contained: installs nginx+certbot (apt) if missing and creates the 'lander' user, sudoers
+# rule and certbot wrapper itself. It does not touch ufw, SSH, vhosts or certificates
+# (orbit-suite/vps-bootstrap/bootstrap.sh remains the way to harden the host and add the TLS vhost).
 # Env: LANDER_REPO (default yogaagungk/lander), LANDER_BASE_URL (override download base, for tests).
 set -euo pipefail
 
@@ -38,6 +39,72 @@ installed_version() { if [[ -x $BIN && -f $VFILE ]]; then cat "$VFILE"; fi; }  #
 listen_addr() { local a; a=$(sed -n 's/^LANDER_LISTEN_ADDR=//p' "$ENV_DIR/$NAME.env" 2>/dev/null | tail -n1); echo "${a:-127.0.0.1:8080}"; }
 # 200 = healthy, 503 = lander up but nginx inactive (still counts as running), 000 = unreachable.
 health_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://$(listen_addr)/healthz" 2>/dev/null || true; }
+
+# Self-contained prerequisites (same owners/modes as orbit-suite vps-bootstrap, idempotent):
+# packages nginx+certbot, group deploy, user lander, dirs, certbot wrapper, sudoers (visudo-checked).
+# Does NOT touch ufw, SSH, the deploy user, vhosts or certificates.
+ensure_prereqs() {
+  local missing=()
+  command -v nginx >/dev/null || missing+=(nginx)
+  command -v certbot >/dev/null || missing+=(certbot python3-certbot-nginx)
+  if ((${#missing[@]})); then
+    command -v apt-get >/dev/null || die "missing ${missing[*]} and no apt-get: install nginx and certbot first"
+    log "installing packages: ${missing[*]}"
+    run env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+  fi
+  [[ -x /usr/sbin/nginx || $DRY == 1 ]] || die "/usr/sbin/nginx not found (sudoers rule expects this path)"
+  getent group deploy >/dev/null 2>&1 || run groupadd deploy
+  id $NAME >/dev/null 2>&1 || run useradd --system --home-dir /var/lib/$NAME --shell /usr/sbin/nologin $NAME
+  run usermod -aG deploy $NAME
+  run install -d -m 0750 -o $NAME -g $NAME /var/lib/$NAME
+  run install -d -m 0755 -o $NAME -g $NAME /var/log/$NAME
+  run install -d -m 2750 -o $NAME -g deploy /var/lib/$NAME/env
+  run install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
+  run chgrp $NAME /etc/nginx/sites-available /etc/nginx/sites-enabled
+  run chmod 2775 /etc/nginx/sites-available /etc/nginx/sites-enabled
+
+  local wrapper=/usr/local/sbin/lander-certbot sudoers=/etc/sudoers.d/lander tmp
+  if ((DRY)); then log "DRY-RUN: write $wrapper (root 0755) and $sudoers (0440, visudo -c)"; return 0; fi
+  cat >"$wrapper" <<'WRAP'
+#!/usr/bin/env bash
+# Root-owned wrapper: lander calls `sudo -n lander-certbot <domain> <email>`.
+set -euo pipefail
+[[ $# -eq 2 ]] || { echo "usage: lander-certbot <domain> <email>" >&2; exit 2; }
+domain="$1"; email="$2"
+re_dom="^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+re_mail="^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+[[ "$domain" =~ $re_dom && ${#domain} -le 253 ]] || { echo "invalid domain" >&2; exit 2; }
+[[ "$email" =~ $re_mail && ${#email} -le 254 ]] || { echo "invalid email" >&2; exit 2; }
+exec /usr/bin/certbot certonly --nginx -d "$domain" --non-interactive --agree-tos --email="$email" --keep-until-expiring
+WRAP
+  chown root:root "$wrapper"; chmod 0755 "$wrapper"
+  tmp=$(mktemp)
+  printf '%s\n' '# Managed by lander install.sh. No wildcards.' \
+    "$NAME ALL=(root) NOPASSWD: /usr/sbin/nginx -t -c /etc/nginx/nginx.conf" \
+    "$NAME ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx" \
+    "$NAME ALL=(root) NOPASSWD: $wrapper" >"$tmp"
+  if visudo -cf "$tmp" >/dev/null; then install -m 0440 -o root -g root "$tmp" "$sudoers"; rm -f "$tmp"
+  else rm -f "$tmp"; die "generated sudoers failed visudo check"; fi
+  # Let lander traverse letsencrypt live/archive if certbot already ran (private keys stay root-only).
+  if [[ -d /etc/letsencrypt/live && -d /etc/letsencrypt/archive ]]; then
+    chgrp $NAME /etc/letsencrypt/live /etc/letsencrypt/archive; chmod 750 /etc/letsencrypt/live /etc/letsencrypt/archive
+    for k in /etc/letsencrypt/archive/*/privkey*.pem; do [[ -e $k ]] || continue; chown root:root "$k"; chmod 600 "$k"; done
+  fi
+  # Renewal hook keeps those permissions after each renewal.
+  install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
+  cat >/etc/letsencrypt/renewal-hooks/deploy/lander-perms.sh <<'HOOK'
+#!/bin/sh
+chgrp lander /etc/letsencrypt/live /etc/letsencrypt/archive
+chmod 750 /etc/letsencrypt/live /etc/letsencrypt/archive
+for k in /etc/letsencrypt/archive/*/privkey*.pem; do
+  [ -e "$k" ] || continue
+  chown root:root "$k"
+  chmod 600 "$k"
+done
+exit 0
+HOOK
+  chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/lander-perms.sh
+}
 
 if [[ $CMD == status ]]; then
   log "binary: $([[ -x $BIN ]] && echo "$BIN ($(installed_version))" || echo missing)"
@@ -85,6 +152,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 log "downloading $ASSET ($VERSION, $ARCH)"
 if ((DRY)); then
   log "DRY-RUN: would fetch $base/$ASSET and $base/checksums.txt, verify sha256, then install atomically to $BIN"
+  ensure_prereqs
   log "DRY-RUN: would keep the previous binary as $BIN.prev and run deploy/install-systemd.sh from the tarball"
   exit 0
 fi
@@ -95,8 +163,8 @@ curl -fsSL --retry 3 -o "$tmp/checksums.txt" "$base/checksums.txt"
 mkdir "$tmp/x" && tar -xzf "$tmp/$ASSET" -C "$tmp/x"
 [[ -f $tmp/x/$NAME && -f $tmp/x/deploy/install-systemd.sh ]] || die "unexpected tarball layout"
 
-# Prerequisite check before touching anything (same as deploy/install-systemd.sh).
-id $NAME >/dev/null 2>&1 || die "user '$NAME' missing: run orbit-suite vps-bootstrap with LANDER_DOMAIN first"
+log "ensuring prerequisites (nginx, certbot, user $NAME, sudoers, certbot wrapper)"
+ensure_prereqs
 
 [[ -x $BIN ]] && cp -p "$BIN" "$BIN.prev"
 install -m 0755 "$tmp/x/$NAME" "$BIN.new" && mv -f "$BIN.new" "$BIN"   # atomic replace
