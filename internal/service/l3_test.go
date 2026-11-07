@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yogaagungk/lander/internal/config"
 	"github.com/yogaagungk/lander/internal/domain"
 )
 
@@ -159,14 +160,17 @@ func TestIssueSSL(t *testing.T) {
 	if !result.Issued || result.Domain != "api.example.com" {
 		t.Errorf("result = %+v", result)
 	}
-	calls := runner.callsOf("/usr/bin/certbot")
+	calls := runner.callsOf("/usr/local/sbin/lander-certbot")
 	if len(calls) != 1 {
 		t.Fatalf("certbot calls = %d", len(calls))
 	}
-	joined := strings.Join(calls[0].args, " ")
-	for _, want := range []string{"certonly", "--nginx", "-d api.example.com", "--email admin@example.com"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("certbot args missing %q: %s", want, joined)
+	wantArgs := []string{"api.example.com", "admin@example.com"}
+	if strings.Join(calls[0].args, " ") != strings.Join(wantArgs, " ") {
+		t.Errorf("certbot args = %v, want exactly %v", calls[0].args, wantArgs)
+	}
+	for _, forbidden := range []string{"certonly", "--nginx", "--email", "--agree-tos"} {
+		if strings.Contains(strings.Join(calls[0].args, " "), forbidden) {
+			t.Errorf("certbot flags leaked to the wrapper: %v", calls[0].args)
 		}
 	}
 
@@ -178,7 +182,7 @@ func TestIssueSSL(t *testing.T) {
 	}
 
 	runner.fail = func(name string, _ []string) ([]byte, error) {
-		if name == "/usr/bin/certbot" {
+		if name == "/usr/local/sbin/lander-certbot" {
 			return []byte("certbot failed"), errors.New("exit status 1")
 		}
 		return nil, nil
@@ -370,6 +374,39 @@ func TestEnvStoreConcurrentWrites(t *testing.T) {
 	for i := 0; i < writers; i++ {
 		if key := fmt.Sprintf("KEY_%02d=", i); !strings.Contains(string(data), key) {
 			t.Errorf("lost concurrent write %s:\n%s", key, data)
+		}
+	}
+}
+
+func TestIssueSSLUsesSudoWrapper(t *testing.T) {
+	runner := &fakeRunner{}
+	svc, cfg := newTestService(t, runner, func(c *config.Config) { c.UseSudo = true })
+	ctx := context.Background()
+
+	if _, err := svc.Apply(ctx, proxySite()); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if _, err := svc.IssueSSL(ctx, domain.SSLRequest{Domain: "api.example.com", Email: "admin@example.com"}); err != nil {
+		t.Fatalf("IssueSSL: %v", err)
+	}
+
+	var certbotCall *runnerCall
+	for _, call := range runner.callsOf("sudo") {
+		if len(call.args) > 1 && call.args[1] == cfg.CertbotBin {
+			selected := call
+			certbotCall = &selected
+		}
+	}
+	if certbotCall == nil {
+		t.Fatal("certbot wrapper was not called through sudo")
+	}
+	want := []string{"-n", cfg.CertbotBin, "api.example.com", "admin@example.com"}
+	if strings.Join(certbotCall.args, " ") != strings.Join(want, " ") {
+		t.Errorf("sudo args = %v, want %v", certbotCall.args, want)
+	}
+	for _, forbidden := range []string{"certonly", "--nginx", "--email"} {
+		if strings.Contains(strings.Join(certbotCall.args, " "), forbidden) {
+			t.Errorf("certbot flags leaked to the wrapper: %v", certbotCall.args)
 		}
 	}
 }

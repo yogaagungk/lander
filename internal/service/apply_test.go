@@ -68,7 +68,7 @@ func newTestService(t *testing.T, runner CommandRunner, mutators ...func(*config
 		NginxConfPath:   filepath.Join(root, "nginx.conf"),
 		NginxBin:        "/usr/sbin/nginx",
 		SystemctlBin:    "/usr/bin/systemctl",
-		CertbotBin:      "/usr/bin/certbot",
+		CertbotBin:      config.DefaultCertbotBin,
 		WebRootBase:     filepath.Join(root, "www"),
 		LetsEncryptDir:  filepath.Join(root, "letsencrypt"),
 		EnvDir:          filepath.Join(root, "env"),
