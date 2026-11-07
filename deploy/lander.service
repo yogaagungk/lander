@@ -30,7 +30,8 @@ LockPersonality=true
 ProtectSystem=full
 PrivateDevices=true
 RestrictNamespaces=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK: sudo audit hook and glibc lookups in the inherited sudo/certbot children may need it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 ProtectClock=true
 ProtectHostname=true
