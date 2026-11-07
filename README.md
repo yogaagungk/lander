@@ -45,6 +45,7 @@ vhost or an SSH tunnel (ADR-002).
 | `LANDER_WEB_ROOT_BASE` | `/var/www` | Allowed static roots |
 | `LANDER_ALLOW_PUBLIC_UPSTREAM` | `false` | Permit public `proxy_target` hosts |
 | `LANDER_SUDO` | `false` | Prefix privileged commands with `sudo -n`; the unit sets `true` |
+| `LANDER_CERTBOT_BIN` | `/usr/local/sbin/lander-certbot` | Root-owned wrapper called as `<domain> <email>` |
 | `LANDER_TRUSTED_PROXY` | `false` | Trust X-Forwarded-For/X-Real-IP only when the peer is loopback |
 | `LANDER_ENV_DIR` | `/var/lib/lander/env` | App env files |
 

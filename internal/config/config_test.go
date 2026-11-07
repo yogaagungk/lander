@@ -27,6 +27,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.SitesAvailable != DefaultSitesAvailable {
 		t.Errorf("SitesAvailable = %q", cfg.SitesAvailable)
 	}
+	if cfg.CertbotBin != "/usr/local/sbin/lander-certbot" {
+		t.Errorf("CertbotBin = %q, want the root-owned wrapper", cfg.CertbotBin)
+	}
 	if cfg.AllowPublicUpstream {
 		t.Error("AllowPublicUpstream should default to false")
 	}

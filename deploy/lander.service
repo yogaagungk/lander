@@ -10,6 +10,7 @@ User=lander
 Group=lander
 EnvironmentFile=-/etc/lander/lander.env
 Environment=LANDER_SUDO=true
+Environment=LANDER_CERTBOT_BIN=/usr/local/sbin/lander-certbot
 ExecStart=/usr/local/bin/lander
 Restart=on-failure
 RestartSec=3

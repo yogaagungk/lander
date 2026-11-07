@@ -20,7 +20,7 @@ const (
 	DefaultNginxConf       = "/etc/nginx/nginx.conf"
 	DefaultNginxBin        = "/usr/sbin/nginx"
 	DefaultSystemctlBin    = "/usr/bin/systemctl"
-	DefaultCertbotBin      = "/usr/bin/certbot"
+	DefaultCertbotBin      = "/usr/local/sbin/lander-certbot"
 	DefaultWebRootBase     = "/var/www"
 	DefaultLetsEncryptDir  = "/etc/letsencrypt/live"
 	DefaultEnvDir          = "/var/lib/lander/env"
