@@ -30,6 +30,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AllowPublicUpstream {
 		t.Error("AllowPublicUpstream should default to false")
 	}
+	if cfg.TrustedProxy {
+		t.Error("TrustedProxy should default to false")
+	}
 	if cfg.AuthFailWindow != time.Minute {
 		t.Errorf("AuthFailWindow = %v", cfg.AuthFailWindow)
 	}
@@ -42,6 +45,7 @@ func TestLoadOverrides(t *testing.T) {
 	env := validEnv()
 	env["LANDER_LISTEN_ADDR"] = "0.0.0.0:9090"
 	env["LANDER_ALLOW_PUBLIC_UPSTREAM"] = "true"
+	env["LANDER_TRUSTED_PROXY"] = "true"
 	env["LANDER_AUTH_FAIL_LIMIT"] = "3"
 	env["LANDER_AUTH_FAIL_WINDOW"] = "30s"
 	env["LANDER_WEB_ROOT_BASE"] = "/srv/www"
@@ -52,6 +56,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.ListenAddr != "0.0.0.0:9090" || !cfg.AllowPublicUpstream {
 		t.Errorf("overrides not applied: %+v", cfg)
+	}
+	if !cfg.TrustedProxy {
+		t.Error("TrustedProxy override not applied")
 	}
 	if cfg.AuthFailLimit != 3 || cfg.AuthFailWindow != 30*time.Second {
 		t.Errorf("rate limit overrides not applied: %+v", cfg)

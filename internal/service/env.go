@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/yogaagungk/lander/internal/domain"
 )
@@ -32,11 +33,14 @@ var (
 // EnvStore manages write-only app env files under one directory.
 type EnvStore struct {
 	dir string
+
+	locksMu  sync.Mutex
+	appLocks map[string]*sync.Mutex
 }
 
 // NewEnvStore builds an env store rooted at dir.
 func NewEnvStore(dir string) *EnvStore {
-	return &EnvStore{dir: dir}
+	return &EnvStore{dir: dir, appLocks: make(map[string]*sync.Mutex)}
 }
 
 // ValidateEnvRequest checks the request shape. Values are never logged.
@@ -87,6 +91,9 @@ func (e *EnvStore) Write(_ context.Context, req domain.EnvRequest) (domain.EnvRe
 		return result, &ValidationError{Issues: issues}
 	}
 
+	unlock := e.lockApp(req.App)
+	defer unlock()
+
 	if err := os.MkdirAll(e.dir, envDirMode); err != nil {
 		return result, fmt.Errorf("create env dir: %w", err)
 	}
@@ -125,6 +132,19 @@ func (e *EnvStore) Write(_ context.Context, req domain.EnvRequest) (domain.EnvRe
 	}
 	result.Keys = keys
 	return result, nil
+}
+
+func (e *EnvStore) lockApp(app string) func() {
+	e.locksMu.Lock()
+	mu, ok := e.appLocks[app]
+	if !ok {
+		mu = &sync.Mutex{}
+		e.appLocks[app] = mu
+	}
+	e.locksMu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
 }
 
 func parseEnvFile(data []byte) map[string]string {

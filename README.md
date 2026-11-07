@@ -45,6 +45,7 @@ vhost or an SSH tunnel (ADR-002).
 | `LANDER_WEB_ROOT_BASE` | `/var/www` | Allowed static roots |
 | `LANDER_ALLOW_PUBLIC_UPSTREAM` | `false` | Permit public `proxy_target` hosts |
 | `LANDER_SUDO` | `false` | Prefix privileged commands with `sudo -n`; the unit sets `true` |
+| `LANDER_TRUSTED_PROXY` | `false` | Trust X-Forwarded-For/X-Real-IP only when the peer is loopback |
 | `LANDER_ENV_DIR` | `/var/lib/lander/env` | App env files |
 
 ## API
@@ -99,6 +100,27 @@ never returns or logs values, and writes `0640` files under `LANDER_ENV_DIR`.
   `nginx -t` and reload.
 - Privileged commands go through `sudo -n` when `LANDER_SUDO=true` (set by
   the unit); the sudoers drop-in allows only the exact forms lander uses.
+
+## Privileges and filesystem (L4 packaging)
+
+- Never use wildcard certbot sudoers. A `certbot ... -d *` entry also matches
+  extra arguments such as `--pre-hook` or `--deploy-hook`, giving root code
+  execution. Install a root-owned wrapper `/usr/local/sbin/lander-certbot
+  <domain> <email>` that re-validates both arguments against the same regexes
+  and execs certbot with fixed flags; name the wrapper in sudoers with no
+  wildcards.
+- certbot runs as root, so `/etc/letsencrypt/live` and `archive` are `0700`
+  and unreadable by `lander`. Then `CertExists`/cert expiry stay false and the
+  443 block is never rendered. Grant group read (for example `chgrp lander`,
+  `chmod 750`, re-applied by a certbot deploy-hook) or add a privileged
+  cert-status helper. The L4 smoke test must show a 443 block and
+  `expires_at` after issuance.
+- `/var/lib/lander/env` needs group `deploy` and the setgid bit; the `lander`
+  user must be in `deploy` so the `0640` env files are group-readable by the
+  deploy user.
+- The nginx vhost in front of lander should set `X-Forwarded-For`; enable
+  `LANDER_TRUSTED_PROXY` so the auth rate limit sees per-client addresses
+  instead of only `127.0.0.1`.
 
 ## Layout
 

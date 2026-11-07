@@ -101,7 +101,7 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 			"status", recorder.status,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"request_id", requestIDFrom(r.Context()),
-			"remote", clientIP(r),
+			"remote", s.clientIP(r),
 		)
 	})
 }
@@ -268,10 +268,32 @@ func (a *auditor) record(action, target, outcome, requestID string) {
 	_, _ = file.Write(append(line, '\n'))
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// clientIP resolves the caller for logging and the auth rate limit. When
+// LANDER_TRUSTED_PROXY is enabled and the request comes from loopback (the
+// nginx vhost), the last X-Forwarded-For hop or X-Real-IP is used. Otherwise
+// headers are ignored so a direct client cannot spoof its address.
+func (s *Server) clientIP(r *http.Request) string {
+	remote := remoteHost(r.RemoteAddr)
+	if !s.cfg.TrustedProxy || net.ParseIP(remote) == nil || !net.ParseIP(remote).IsLoopback() {
+		return remote
+	}
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		last := strings.TrimSpace(parts[len(parts)-1])
+		if net.ParseIP(last) != nil {
+			return last
+		}
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(realIP) != nil {
+		return realIP
+	}
+	return remote
+}
+
+func remoteHost(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
 	if err == nil {
 		return host
 	}
-	return strings.TrimSpace(r.RemoteAddr)
+	return strings.TrimSpace(remoteAddr)
 }

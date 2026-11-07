@@ -9,10 +9,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -332,5 +334,42 @@ func writeTestCertificate(t *testing.T, dir, domainName string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), []byte(buf.String()), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEnvStoreConcurrentWrites(t *testing.T) {
+	store := NewEnvStore(t.TempDir())
+	const writers = 20
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		key := fmt.Sprintf("KEY_%02d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.Write(context.Background(), domain.EnvRequest{
+				App:  "app",
+				Vars: map[string]string{key: "v"},
+			})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent write: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(store.dir, "app.env"))
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	for i := 0; i < writers; i++ {
+		if key := fmt.Sprintf("KEY_%02d=", i); !strings.Contains(string(data), key) {
+			t.Errorf("lost concurrent write %s:\n%s", key, data)
+		}
 	}
 }

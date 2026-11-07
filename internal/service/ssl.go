@@ -26,14 +26,16 @@ func (s *Nginx) IssueSSL(ctx context.Context, req domain.SSLRequest) (domain.SSL
 		return result, &ValidationError{Issues: []domain.Issue{{Field: "email", Message: msg}}}
 	}
 
+	unlock := s.lockDomain(req.Domain)
+	defer unlock()
+
+	// Re-check under the domain lock so a concurrent DELETE cannot slip in
+	// between the existence check and certbot.
 	if _, exists, err := readFileIfExists(s.sitePath(req.Domain)); err != nil {
 		return result, fmt.Errorf("read site config: %w", err)
 	} else if !exists {
 		return result, ErrNotFound
 	}
-
-	unlock := s.lockDomain(req.Domain)
-	defer unlock()
 
 	// certbot talks to nginx and may reload it; keep applies out of the way.
 	s.cmdMu.Lock()

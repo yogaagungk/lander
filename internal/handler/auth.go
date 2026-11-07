@@ -15,10 +15,17 @@ func sha256Sum(token string) [32]byte {
 }
 
 // authenticate enforces the bearer token with a constant-time digest compare
-// and a per-IP failed-attempt rate limit.
+// and a per-IP failed-attempt rate limit. The token is checked first so a
+// valid caller is never locked out by another client behind the same proxy IP.
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
+		ip := s.clientIP(r)
+
+		token, hasToken := bearerToken(r)
+		if hasToken && constantTimeEqual(token, s.tokenHash) {
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		if !s.limiter.allowed(ip) {
 			retry := s.limiter.retryAfter(ip)
@@ -27,19 +34,12 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			return
 		}
 
-		token, ok := bearerToken(r)
-		if !ok || !constantTimeEqual(token, s.tokenHash) {
-			s.limiter.fail(ip)
-			if s.authDelay > 0 {
-				time.Sleep(s.authDelay)
-			}
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			s.writeError(w, r, http.StatusUnauthorized, "unauthorized", "unauthorized")
-			return
+		s.limiter.fail(ip)
+		if s.authDelay > 0 {
+			time.Sleep(s.authDelay)
 		}
-
-		s.limiter.reset(ip)
-		next.ServeHTTP(w, r)
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		s.writeError(w, r, http.StatusUnauthorized, "unauthorized", "unauthorized")
 	})
 }
 
@@ -114,12 +114,6 @@ func (l *failureLimiter) fail(ip string) {
 		return
 	}
 	entry.count++
-}
-
-func (l *failureLimiter) reset(ip string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.entries, ip)
 }
 
 func (l *failureLimiter) retryAfter(ip string) time.Duration {
