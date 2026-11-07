@@ -63,6 +63,12 @@ type renderData struct {
 // apply (for example enable_ssl without an issued certificate).
 func Render(sc domain.SiteConfig, opts RenderOptions) (string, []string, error) {
 	if sc.RawConfig != "" {
+		// GET returns the stored file (marker included); do not duplicate the
+		// marker when that raw config is posted back.
+		trimmed := strings.TrimLeft(sc.RawConfig, " \t\r\n")
+		if strings.HasPrefix(trimmed, managedMarker) {
+			return ensureTrailingNewline(sc.RawConfig), nil, nil
+		}
 		return managedMarker + " — raw config\n" + ensureTrailingNewline(sc.RawConfig), nil, nil
 	}
 

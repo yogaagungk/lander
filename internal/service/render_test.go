@@ -135,6 +135,24 @@ func TestRenderRawConfigKeepsMarker(t *testing.T) {
 	}
 }
 
+func TestRenderRawConfigIsIdempotent(t *testing.T) {
+	raw := "server {\n    listen 80;\n    server_name raw.example.com;\n}\n"
+	first, _, err := Render(domain.SiteConfig{Domain: "raw.example.com", RawConfig: raw}, RenderOptions{})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	second, _, err := Render(domain.SiteConfig{Domain: "raw.example.com", RawConfig: first}, RenderOptions{})
+	if err != nil {
+		t.Fatalf("Render again: %v", err)
+	}
+	if second != first {
+		t.Errorf("re-posting GET output changed the file:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+	if strings.Count(second, managedMarker) != 1 {
+		t.Errorf("managed marker duplicated:\n%s", second)
+	}
+}
+
 func TestETagIsStableAndSensitive(t *testing.T) {
 	a := ETag("one")
 	if len(a) != 64 {
