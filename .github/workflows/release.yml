@@ -1,0 +1,44 @@
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        run: go test -race -count=1 ./...
+      - name: Build, package and checksum
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ver="${TAG#v}"
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            d="$(mktemp -d)"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${TAG}" -o "$d/lander" ./cmd/lander
+            mkdir "$d/deploy"
+            cp deploy/lander.service deploy/lander.env.example deploy/install-systemd.sh "$d/deploy/"
+            tar -C "$d" -czf "dist/lander_${ver}_linux_${arch}.tar.gz" lander deploy
+          done
+          cp install.sh dist/install.sh
+          (cd dist && sha256sum ./*.tar.gz install.sh | sed 's# \./# #' > checksums.txt)
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag

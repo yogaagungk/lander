@@ -158,6 +158,28 @@ curl -s -H "Authorization: Bearer $LANDER_SECRET_TOKEN" http://127.0.0.1:8080/ap
 {"cpu_usage":4.21,"memory_usage":37.6,"nginx_active":true,"uptime":864000}
 ```
 
+## One-click install on the VPS
+
+Prerequisite: run `orbit-suite/vps-bootstrap/bootstrap.sh` with `LANDER_DOMAIN` first (creates the `lander` user, sudoers rule, Nginx and the certbot wrapper). Then, as root on the VPS (Linux amd64 or arm64):
+
+```sh
+curl -fsSL https://github.com/yogaagungk/lander/releases/latest/download/install.sh | sudo bash
+# pin a version (recommended) and preview without changing anything:
+curl -fsSL https://github.com/yogaagungk/lander/releases/download/v0.1.0/install.sh | sudo bash -s -- --version v0.1.0 --dry-run
+```
+
+The installer downloads the release tarball and `checksums.txt`, verifies sha256 (stops on mismatch), replaces `/usr/local/bin/lander` atomically, installs the hardened systemd unit, and creates `/etc/lander/lander.env` only if absent (never overwritten). It starts the service only after you set `LANDER_SECRET_TOKEN` (`openssl rand -hex 32`), then checks `/healthz`; on a failed health check it restores the previous binary (`/usr/local/bin/lander.prev`).
+
+| Command | Effect |
+|---|---|
+| `install.sh install [--version vX.Y.Z]` | First install (default: latest release). |
+| `install.sh upgrade [--version vX.Y.Z]` | Same flow, prints installed and target version. |
+| `install.sh status` | Binary version, service state, `/healthz` code. |
+| `install.sh uninstall [--purge]` | Removes service and binary; keeps config and data unless `--purge`. |
+| `--dry-run` | Prints what would happen, changes nothing. |
+
+Releases are built by GitHub Actions on every `vX.Y.Z` tag (`.github/workflows/release.yml`): static `linux_amd64` and `linux_arm64` tarballs, `checksums.txt` and `install.sh`. Use `LANDER_REPO` to install from a fork.
+
 ## Usage reference
 
 All `/api/v1/*` routes require `Authorization: Bearer <LANDER_SECRET_TOKEN>`. Errors use `{"error":{"code","message","request_id"}}`; validation errors add an `issues` array. `GET /healthz` is public.
@@ -245,7 +267,9 @@ internal/config       environment parsing and validation
 internal/domain       API structs and JSON contract
 internal/handler      HTTP API, bearer auth, rate limiting, error envelope
 internal/service      Nginx rendering, validation, apply/rollback, SSL, env, stats
-deploy/               systemd unit, installer and env example
+install.sh            VPS one-click installer (also a release asset)
+deploy/               systemd unit, install-systemd.sh and env example
+.github/workflows/    ci.yml and release.yml (tag vX.Y.Z builds the release)
 openapi.yaml          API contract copied from the suite docs
 ```
 
